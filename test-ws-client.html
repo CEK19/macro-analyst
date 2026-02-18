@@ -1,0 +1,384 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WebSocket Price Ticker Test</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            padding: 20px;
+            min-height: 100vh;
+        }
+        
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+        
+        h1 {
+            color: white;
+            text-align: center;
+            margin-bottom: 30px;
+            font-size: 2.5em;
+            text-shadow: 2px 2px 4px rgba(0,0,0,0.2);
+        }
+        
+        .status {
+            background: white;
+            padding: 15px;
+            border-radius: 10px;
+            margin-bottom: 20px;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+        }
+        
+        .status-indicator {
+            display: inline-block;
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+            margin-right: 8px;
+        }
+        
+        .connected { background-color: #10b981; }
+        .disconnected { background-color: #ef4444; }
+        .connecting { background-color: #f59e0b; }
+        
+        .controls {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 20px;
+        }
+        
+        button {
+            padding: 12px 24px;
+            border: none;
+            border-radius: 8px;
+            font-size: 16px;
+            cursor: pointer;
+            transition: all 0.3s;
+            font-weight: 600;
+        }
+        
+        button:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 4px 12px rgba(0,0,0,0.2);
+        }
+        
+        .btn-connect {
+            background-color: #10b981;
+            color: white;
+        }
+        
+        .btn-disconnect {
+            background-color: #ef4444;
+            color: white;
+        }
+        
+        .btn-clear {
+            background-color: #6b7280;
+            color: white;
+        }
+        
+        .price-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 20px;
+            margin-bottom: 20px;
+        }
+        
+        .price-card {
+            background: white;
+            padding: 20px;
+            border-radius: 10px;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+            transition: transform 0.2s;
+        }
+        
+        .price-card:hover {
+            transform: scale(1.05);
+        }
+        
+        .price-card.positive {
+            border-left: 4px solid #10b981;
+        }
+        
+        .price-card.negative {
+            border-left: 4px solid #ef4444;
+        }
+        
+        .symbol {
+            font-size: 1.5em;
+            font-weight: bold;
+            color: #1f2937;
+            margin-bottom: 10px;
+        }
+        
+        .price {
+            font-size: 2em;
+            font-weight: bold;
+            color: #374151;
+            margin: 10px 0;
+        }
+        
+        .change {
+            font-size: 1.1em;
+            font-weight: 600;
+        }
+        
+        .change.positive {
+            color: #10b981;
+        }
+        
+        .change.negative {
+            color: #ef4444;
+        }
+        
+        .timestamp {
+            color: #6b7280;
+            font-size: 0.9em;
+            margin-top: 8px;
+        }
+        
+        .volume {
+            color: #6b7280;
+            font-size: 0.9em;
+        }
+        
+        .log-container {
+            background: #1f2937;
+            color: #10b981;
+            padding: 20px;
+            border-radius: 10px;
+            max-height: 400px;
+            overflow-y: auto;
+            font-family: 'Courier New', monospace;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+        }
+        
+        .log-entry {
+            margin-bottom: 8px;
+            padding: 4px;
+            border-bottom: 1px solid #374151;
+        }
+        
+        .stats {
+            background: white;
+            padding: 15px;
+            border-radius: 10px;
+            margin-bottom: 20px;
+            display: flex;
+            justify-content: space-around;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+        }
+        
+        .stat-item {
+            text-align: center;
+        }
+        
+        .stat-label {
+            color: #6b7280;
+            font-size: 0.9em;
+        }
+        
+        .stat-value {
+            font-size: 1.8em;
+            font-weight: bold;
+            color: #1f2937;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>📊 Real-time Market Data</h1>
+        
+        <div class="status">
+            <span class="status-indicator disconnected" id="statusIndicator"></span>
+            <span id="statusText">Disconnected</span>
+        </div>
+        
+        <div class="controls">
+            <button class="btn-connect" onclick="connect()">Connect</button>
+            <button class="btn-disconnect" onclick="disconnect()">Disconnect</button>
+            <button class="btn-clear" onclick="clearLogs()">Clear Logs</button>
+        </div>
+        
+        <div class="stats">
+            <div class="stat-item">
+                <div class="stat-label">Messages Received</div>
+                <div class="stat-value" id="messageCount">0</div>
+            </div>
+            <div class="stat-item">
+                <div class="stat-label">Uptime</div>
+                <div class="stat-value" id="uptime">00:00</div>
+            </div>
+            <div class="stat-item">
+                <div class="stat-label">Active Symbols</div>
+                <div class="stat-value" id="symbolCount">0</div>
+            </div>
+        </div>
+        
+        <div class="price-grid" id="priceGrid"></div>
+        
+        <h3 style="color: white; margin: 20px 0;">Connection Logs</h3>
+        <div class="log-container" id="logs"></div>
+    </div>
+
+    <script>
+        let ws = null;
+        let messageCount = 0;
+        let startTime = null;
+        let uptimeInterval = null;
+        const prices = {};
+
+        function addLog(message, type = 'info') {
+            const logs = document.getElementById('logs');
+            const entry = document.createElement('div');
+            entry.className = 'log-entry';
+            const timestamp = new Date().toLocaleTimeString();
+            entry.textContent = `[${timestamp}] ${message}`;
+            logs.appendChild(entry);
+            logs.scrollTop = logs.scrollHeight;
+        }
+
+        function updateStatus(status, text) {
+            const indicator = document.getElementById('statusIndicator');
+            const statusText = document.getElementById('statusText');
+            indicator.className = `status-indicator ${status}`;
+            statusText.textContent = text;
+        }
+
+        function updateStats() {
+            document.getElementById('messageCount').textContent = messageCount;
+            document.getElementById('symbolCount').textContent = Object.keys(prices).length;
+        }
+
+        function startUptime() {
+            startTime = Date.now();
+            uptimeInterval = setInterval(() => {
+                const elapsed = Math.floor((Date.now() - startTime) / 1000);
+                const minutes = Math.floor(elapsed / 60);
+                const seconds = elapsed % 60;
+                document.getElementById('uptime').textContent = 
+                    `${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
+            }, 1000);
+        }
+
+        function stopUptime() {
+            if (uptimeInterval) {
+                clearInterval(uptimeInterval);
+                uptimeInterval = null;
+            }
+            document.getElementById('uptime').textContent = '00:00';
+        }
+
+        function updatePriceCard(data) {
+            prices[data.symbol] = data;
+            
+            const grid = document.getElementById('priceGrid');
+            let card = document.getElementById(`card-${data.symbol}`);
+            
+            if (!card) {
+                card = document.createElement('div');
+                card.id = `card-${data.symbol}`;
+                card.className = 'price-card';
+                grid.appendChild(card);
+            }
+
+            const changeClass = data.change >= 0 ? 'positive' : 'negative';
+            card.className = `price-card ${changeClass}`;
+            
+            const changeSign = data.change >= 0 ? '+' : '';
+            const changePercentSign = data.changePercent >= 0 ? '+' : '';
+            
+            card.innerHTML = `
+                <div class="symbol">${data.symbol}</div>
+                <div class="price">$${data.price.toFixed(2)}</div>
+                <div class="change ${changeClass}">
+                    ${changeSign}${data.change.toFixed(2)} (${changePercentSign}${data.changePercent.toFixed(2)}%)
+                </div>
+                <div class="volume">Vol: ${data.volume.toLocaleString()}</div>
+                <div class="timestamp">⏱️ ${data.timestamp}</div>
+            `;
+        }
+
+        function connect() {
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                addLog('Already connected!');
+                return;
+            }
+
+            updateStatus('connecting', 'Connecting...');
+            addLog('Connecting to WebSocket server...');
+
+            ws = new WebSocket('ws://localhost:8080/ws/prices');
+
+            ws.onopen = function(event) {
+                updateStatus('connected', 'Connected');
+                addLog('✅ Connected to WebSocket server!');
+                startUptime();
+            };
+
+            ws.onmessage = function(event) {
+                messageCount++;
+                updateStats();
+                
+                try {
+                    const data = JSON.parse(event.data);
+                    
+                    if (data.type === 'multi_update') {
+                        // Handle multiple symbols
+                        data.data.forEach(priceUpdate => {
+                            updatePriceCard(priceUpdate);
+                        });
+                        addLog(`📦 Received batch update for ${data.data.length} symbols`);
+                    } else {
+                        // Handle single symbol
+                        updatePriceCard(data);
+                        addLog(`📈 ${data.symbol}: $${data.price.toFixed(2)} (${data.changePercent >= 0 ? '+' : ''}${data.changePercent.toFixed(2)}%)`);
+                    }
+                } catch (err) {
+                    addLog(`❌ Error parsing message: ${err.message}`);
+                }
+            };
+
+            ws.onerror = function(error) {
+                addLog(`❌ WebSocket error occurred`);
+                updateStatus('disconnected', 'Error');
+            };
+
+            ws.onclose = function(event) {
+                addLog(`🔌 Connection closed (code: ${event.code})`);
+                updateStatus('disconnected', 'Disconnected');
+                stopUptime();
+            };
+        }
+
+        function disconnect() {
+            if (ws) {
+                ws.close();
+                ws = null;
+                addLog('Disconnecting...');
+            }
+        }
+
+        function clearLogs() {
+            document.getElementById('logs').innerHTML = '';
+            addLog('Logs cleared');
+        }
+
+        // Auto-connect on load
+        window.onload = function() {
+            addLog('🚀 WebSocket Test Client Ready');
+            addLog('Click "Connect" to start receiving real-time market data');
+        };
+    </script>
+</body>
+</html>

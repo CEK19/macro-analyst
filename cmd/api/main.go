@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"log"
-	"macro-analyst/internal/server"
 	"os"
 	"os/signal"
 	"strconv"
@@ -12,53 +11,98 @@ import (
 	"time"
 
 	_ "github.com/joho/godotenv/autoload"
+
+	"macro-analyst/internal/server"
+	"macro-analyst/internal/ws"
 )
 
-func gracefulShutdown(fiberServer *server.FiberServer, done chan bool) {
-	// Create context that listens for the interrupt signal from the OS.
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer stop()
+const (
+	// DefaultPort is used if PORT environment variable is not set
+	DefaultPort = 8080
 
-	// Listen for the interrupt signal.
-	<-ctx.Done()
-
-	log.Println("shutting down gracefully, press Ctrl+C again to force")
-
-	// The context is used to inform the server it has 5 seconds to finish
-	// the request it is currently handling
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	if err := fiberServer.ShutdownWithContext(ctx); err != nil {
-		log.Printf("Server forced to shutdown with error: %v", err)
-	}
-
-	log.Println("Server exiting")
-
-	// Notify the main goroutine that the shutdown is complete
-	done <- true
-}
+	// ShutdownTimeout is the maximum time to wait for graceful shutdown
+	ShutdownTimeout = 5 * time.Second
+)
 
 func main() {
+	// Initialize the WebSocket Hub
+	hub := ws.NewHub()
+	go hub.Run()
+	log.Println("WebSocket Hub started")
 
-	server := server.New()
+	// Initialize the Price Ingestor with custom throttle interval
+	ingestor := ws.NewIngestor(hub,
+		ws.WithThrottleInterval(500*time.Millisecond),
+	)
 
-	server.RegisterFiberRoutes()
+	// Start the ingestor - connects to Binance WebSocket
+	go ingestor.Start()
+	log.Println("Price Ingestor started - connecting to Binance for real-time data")
 
-	// Create a done channel to signal when the shutdown is complete
-	done := make(chan bool, 1)
+	// Initialize the HTTP/WebSocket server
+	srv := server.New(hub)
+	srv.RegisterFiberRoutes()
 
-	go func() {
-		port, _ := strconv.Atoi(os.Getenv("PORT"))
-		err := server.Listen(fmt.Sprintf(":%d", port))
-		if err != nil {
-			panic(fmt.Sprintf("http server error: %s", err))
-		}
-	}()
+	// Start the server in a goroutine
+	port := getPort()
+	go startServer(srv, port)
 
-	// Run graceful shutdown in a separate goroutine
-	go gracefulShutdown(server, done)
+	// Wait for shutdown signal and perform graceful shutdown
+	waitForShutdown(srv, ingestor)
+}
 
-	// Wait for the graceful shutdown to complete
-	<-done
-	log.Println("Graceful shutdown complete.")
+// getPort retrieves the port number from environment variable or returns default.
+func getPort() int {
+	portStr := os.Getenv("PORT")
+	if portStr == "" {
+		return DefaultPort
+	}
+
+	port, err := strconv.Atoi(portStr)
+	if err != nil {
+		log.Printf("Invalid PORT value '%s', using default %d", portStr, DefaultPort)
+		return DefaultPort
+	}
+
+	return port
+}
+
+// startServer starts the HTTP/WebSocket server on the specified port.
+func startServer(srv *server.FiberServer, port int) {
+	log.Printf("Server starting on port %d", port)
+	log.Printf("WebSocket endpoint: ws://localhost:%d/ws/prices", port)
+	log.Printf("Health check: http://localhost:%d/health", port)
+
+	addr := fmt.Sprintf(":%d", port)
+	if err := srv.Listen(addr); err != nil {
+		log.Fatalf("Server error: %v", err)
+	}
+}
+
+// waitForShutdown blocks until an interrupt signal is received,
+// then performs a graceful shutdown of the server.
+func waitForShutdown(srv *server.FiberServer, ingestor *ws.Ingestor) {
+	// Create a channel to listen for interrupt signals
+	quit := make(chan os.Signal, 1)
+	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
+
+	// Block until we receive a signal
+	sig := <-quit
+	log.Printf("Received signal %v, shutting down gracefully...", sig)
+
+	// Stop the ingestor first
+	if ingestor != nil {
+		ingestor.Stop()
+	}
+
+	// Create a context with timeout for shutdown
+	ctx, cancel := context.WithTimeout(context.Background(), ShutdownTimeout)
+	defer cancel()
+
+	// Attempt graceful shutdown
+	if err := srv.ShutdownWithContext(ctx); err != nil {
+		log.Printf("Server forced to shutdown: %v", err)
+	} else {
+		log.Println("Server shutdown completed successfully")
+	}
 }

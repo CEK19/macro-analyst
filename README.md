@@ -1,39 +1,144 @@
-# Project macro-analyst
+# Macro Analyst
 
-One Paragraph of project description goes here
+Real-time cryptocurrency market data streaming from **Binance** via WebSocket.
 
-## Getting Started
+## Features
 
-These instructions will get you a copy of the project up and running on your local machine for development and testing purposes. See deployment for notes on how to deploy the project on a live system.
+- 🚀 **Real-time Data**: Live prices from Binance using `adshao/go-binance` SDK
+- 📊 **Multi-Symbol Tracking**: BTC, ETH, BNB, SOL, ADA, XRP (all vs USDT)
+- 🔄 **Auto-Reconnect**: Automatic reconnection on connection loss
+- ⚡ **Throttling**: Smart throttling to prevent overwhelming clients
+- 🧵 **Concurrent**: Hub-and-Spoke pattern with goroutine-safe broadcasting
+- 🛡️ **Production-Ready**: Graceful shutdown, context cancellation, comprehensive tests
 
-## MakeFile
+## Architecture
 
-Run build make command with tests
-```bash
-make all
+```
+┌─────────────┐
+│  Binance    │  ← Real-time WebSocket data
+│  WebSocket  │
+└──────┬──────┘
+       │
+       ▼
+┌─────────────┐
+│  Ingestor   │  ← Data ingestion + throttling (500ms)
+└──────┬──────┘
+       │
+       ▼
+┌─────────────┐
+│     Hub     │  ← Central message broker
+└──────┬──────┘
+       │
+       ├───────┬───────┬───────┐
+       ▼       ▼       ▼       ▼
+   Client  Client  Client  Client  ← WebSocket connections
 ```
 
-Build the application
+## Run Server
+
 ```bash
-make build
+# Install dependencies
+go mod download
+
+# Start with hot reload
+air
+
+# Or direct run
+go run cmd/api/main.go
 ```
 
-Run the application
+Server starts on `http://localhost:8080`
+
+## Endpoints
+
+- `ws://localhost:8080/ws/prices` - WebSocket for real-time prices
+- `http://localhost:8080/health` - Health check
+- `http://localhost:8080/` - API info
+
+## Test
+
 ```bash
-make run
+# Run all tests
+go test ./...
+
+# With coverage
+go test ./... -cover
+
+# Specific package
+go test ./internal/ws/... -v
 ```
 
-Live reload the application:
-```bash
-make watch
+## Test WebSocket
+
+Open `test-ws-client.html` in browser and click Connect.
+
+### Expected Data Format
+
+**Single Symbol Update:**
+```json
+{
+  "symbol": "BTCUSDT",
+  "price": 94250.50,
+  "change": 125.30,
+  "changePercent": 0.13,
+  "volume": 15234567890,
+  "timestamp": "14:23:45.123"
+}
 ```
 
-Run the test suite:
-```bash
-make test
+**Multi-Symbol Update:**
+```json
+{
+  "type": "multi_update",
+  "data": [
+    {
+      "symbol": "BTCUSDT",
+      "price": 94250.50,
+      "change": 125.30,
+      "changePercent": 0.13,
+      "volume": 15234567890,
+      "timestamp": "14:23:45.123"
+    },
+    {
+      "symbol": "ETHUSDT",
+      "price": 2635.80,
+      ...
+    }
+  ]
+}
 ```
 
-Clean up binary from the last build:
-```bash
-make clean
+## Environment
+
+Create `.env` file:
 ```
+PORT=8080
+APP_ENV=local
+```
+
+## Configuration
+
+Customize the Ingestor in `cmd/api/main.go`:
+
+```go
+// Change throttle interval
+ingestor := ws.NewIngestor(hub,
+    ws.WithThrottleInterval(1 * time.Second),
+)
+
+// Add more symbols
+ingestor.AddSymbol("DOGEUSDT")
+```
+
+## Dependencies
+
+- **gofiber/fiber** - Fast HTTP framework
+- **adshao/go-binance** - Official Binance SDK
+- **gofiber/contrib/websocket** - WebSocket support
+
+## Performance
+
+- **Throttle Interval**: 500ms (configurable)
+- **Update Rate**: ~10 updates/second (6 symbols)
+- **Auto-Reconnect**: Built-in with exponential backoff
+- **Graceful Shutdown**: Clean disconnection on SIGINT/SIGTERM
