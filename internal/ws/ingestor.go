@@ -120,57 +120,76 @@ func (i *Ingestor) StartMultiSymbol() {
 
 	log.Printf("Connecting to Binance for %d symbols...", len(symbols))
 
-	// Create a throttle ticker to control broadcast rate
 	throttleTicker := time.NewTicker(i.throttleInterval)
 	defer throttleTicker.Stop()
 
 	var pendingUpdate *MultiUpdate
 
-	// Handler for WebSocket events
-	wsHandler := func(event *binance.WsMarketStatEvent) {
-		// Update the symbol's cached data
-		i.updateSymbolData(event)
+	wsHandler := i.createWebSocketHandler(&pendingUpdate)
+	errHandler := i.createErrorHandler()
 
-		// Prepare the update (but don't send yet - wait for throttle)
-		priceUpdate := i.convertEventToPriceUpdate(event)
-
-		// Queue this update
-		if pendingUpdate == nil {
-			pendingUpdate = &MultiUpdate{
-				Type: "multi_update",
-				Data: []*PriceUpdate{priceUpdate},
-			}
-		} else {
-			// Check if this symbol already exists in pending updates
-			found := false
-			for idx, existing := range pendingUpdate.Data {
-				if existing.Symbol == priceUpdate.Symbol {
-					// Replace with newer data
-					pendingUpdate.Data[idx] = priceUpdate
-					found = true
-					break
-				}
-			}
-			if !found {
-				pendingUpdate.Data = append(pendingUpdate.Data, priceUpdate)
-			}
-		}
-	}
-
-	errHandler := func(err error) {
-		log.Printf("Binance WebSocket error: %v", err)
-	}
-
-	// Connect to Binance WebSocket (this is non-blocking)
-	doneC, _, err := binance.WsCombinedMarketStatServe(symbols, wsHandler, errHandler)
+	doneC, err := i.connectToBinance(symbols, wsHandler, errHandler)
 	if err != nil {
 		log.Printf("Failed to connect to Binance: %v", err)
 		return
 	}
 
-	i.doneChannels = append(i.doneChannels, doneC)
+	i.startThrottledBroadcast(throttleTicker, &pendingUpdate)
+	i.waitForShutdown(doneC)
+}
 
-	// Throttle loop - broadcasts updates at controlled rate
+// createWebSocketHandler creates a handler for incoming WebSocket events.
+func (i *Ingestor) createWebSocketHandler(pendingUpdate **MultiUpdate) func(*binance.WsMarketStatEvent) {
+	return func(event *binance.WsMarketStatEvent) {
+		i.updateSymbolData(event)
+		priceUpdate := i.convertEventToPriceUpdate(event)
+		i.queuePriceUpdate(pendingUpdate, priceUpdate)
+	}
+}
+
+// createErrorHandler creates an error handler for WebSocket errors.
+func (i *Ingestor) createErrorHandler() func(error) {
+	return func(err error) {
+		log.Printf("Binance WebSocket error: %v", err)
+	}
+}
+
+// connectToBinance establishes a WebSocket connection to Binance.
+func (i *Ingestor) connectToBinance(symbols []string, wsHandler func(*binance.WsMarketStatEvent), errHandler func(error)) (chan struct{}, error) {
+	doneC, _, err := binance.WsCombinedMarketStatServe(symbols, wsHandler, errHandler)
+	if err != nil {
+		return nil, err
+	}
+	i.doneChannels = append(i.doneChannels, doneC)
+	return doneC, nil
+}
+
+// queuePriceUpdate adds or updates a price update in the pending queue.
+func (i *Ingestor) queuePriceUpdate(pendingUpdate **MultiUpdate, priceUpdate *PriceUpdate) {
+	if *pendingUpdate == nil {
+		*pendingUpdate = &MultiUpdate{
+			Type: "multi_update",
+			Data: []*PriceUpdate{priceUpdate},
+		}
+		return
+	}
+
+	i.updateOrAppendPrice(*pendingUpdate, priceUpdate)
+}
+
+// updateOrAppendPrice updates an existing symbol or appends a new one.
+func (i *Ingestor) updateOrAppendPrice(multiUpdate *MultiUpdate, priceUpdate *PriceUpdate) {
+	for idx, existing := range multiUpdate.Data {
+		if existing.Symbol == priceUpdate.Symbol {
+			multiUpdate.Data[idx] = priceUpdate
+			return
+		}
+	}
+	multiUpdate.Data = append(multiUpdate.Data, priceUpdate)
+}
+
+// startThrottledBroadcast starts a goroutine that broadcasts updates at a controlled rate.
+func (i *Ingestor) startThrottledBroadcast(throttleTicker *time.Ticker, pendingUpdate **MultiUpdate) {
 	go func() {
 		for {
 			select {
@@ -178,29 +197,40 @@ func (i *Ingestor) StartMultiSymbol() {
 				log.Println("Ingestor stopped")
 				return
 			case <-throttleTicker.C:
-				if pendingUpdate != nil && len(pendingUpdate.Data) > 0 {
-					// Broadcast the batched updates
-					jsonData, err := json.Marshal(pendingUpdate)
-					if err != nil {
-						log.Printf("Error marshaling update: %v", err)
-						continue
-					}
-
-					select {
-					case i.hub.broadcast <- jsonData:
-						log.Printf("✓ Broadcasted %d symbol updates", len(pendingUpdate.Data))
-					default:
-						log.Println("⚠ Broadcast channel full, skipping update")
-					}
-
-					// Reset pending updates
-					pendingUpdate = nil
-				}
+				i.broadcastPendingUpdates(pendingUpdate)
 			}
 		}
 	}()
+}
 
-	// Wait for WebSocket to close or context cancellation
+// broadcastPendingUpdates marshals and broadcasts pending updates to the hub.
+func (i *Ingestor) broadcastPendingUpdates(pendingUpdate **MultiUpdate) {
+	if *pendingUpdate == nil || len((*pendingUpdate).Data) == 0 {
+		return
+	}
+
+	jsonData, err := json.Marshal(*pendingUpdate)
+	if err != nil {
+		log.Printf("Error marshaling update: %v", err)
+		return
+	}
+
+	i.sendToHub(jsonData, len((*pendingUpdate).Data))
+	*pendingUpdate = nil
+}
+
+// sendToHub sends data to the hub broadcast channel with overflow protection.
+func (i *Ingestor) sendToHub(data []byte, updateCount int) {
+	select {
+	case i.hub.broadcast <- data:
+		log.Printf("✓ Broadcasted %d symbol updates", updateCount)
+	default:
+		log.Println("⚠ Broadcast channel full, skipping update")
+	}
+}
+
+// waitForShutdown waits for either WebSocket closure or context cancellation.
+func (i *Ingestor) waitForShutdown(doneC chan struct{}) {
 	select {
 	case <-doneC:
 		log.Println("Binance WebSocket connection closed")
@@ -222,14 +252,12 @@ func (i *Ingestor) Stop() {
 
 // updateSymbolData updates the cached symbol data from a Binance event.
 func (i *Ingestor) updateSymbolData(event *binance.WsMarketStatEvent) {
-	for _, symbol := range i.symbols {
-		if symbol.Name == event.Symbol {
-			symbol.LastPrice = event.LastPrice
-			symbol.LastChange = event.PriceChangePercent
-			symbol.LastVolume = event.BaseVolume
-			symbol.LastUpdateAt = time.Now()
-			break
-		}
+	symbol := i.findSymbol(event.Symbol)
+	if symbol != nil {
+		symbol.LastPrice = event.LastPrice
+		symbol.LastChange = event.PriceChangePercent
+		symbol.LastVolume = event.BaseVolume
+		symbol.LastUpdateAt = time.Now()
 	}
 }
 
@@ -277,22 +305,33 @@ func (i *Ingestor) RemoveSymbol(name string) bool {
 
 // GetCurrentPrice returns the last known price of a symbol.
 func (i *Ingestor) GetCurrentPrice(name string) (string, error) {
-	for _, symbol := range i.symbols {
-		if symbol.Name == name {
-			if symbol.LastPrice == "" {
-				return "", fmt.Errorf("no price data yet for: %s", name)
-			}
-			return symbol.LastPrice, nil
-		}
+	symbol := i.findSymbol(name)
+	if symbol == nil {
+		return "", fmt.Errorf("symbol not found: %s", name)
 	}
-	return "", fmt.Errorf("symbol not found: %s", name)
+	
+	if symbol.LastPrice == "" {
+		return "", fmt.Errorf("no price data yet for: %s", name)
+	}
+	
+	return symbol.LastPrice, nil
 }
 
 // GetSymbols returns a copy of all tracked symbols.
 func (i *Ingestor) GetSymbols() []string {
 	symbols := make([]string, len(i.symbols))
-	for i, symbol := range i.symbols {
-		symbols[i] = symbol.Name
+	for idx, symbol := range i.symbols {
+		symbols[idx] = symbol.Name
 	}
 	return symbols
+}
+
+// findSymbol returns the symbol with the given name, or nil if not found.
+func (i *Ingestor) findSymbol(name string) *Symbol {
+	for _, symbol := range i.symbols {
+		if symbol.Name == name {
+			return symbol
+		}
+	}
+	return nil
 }
