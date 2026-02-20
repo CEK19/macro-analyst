@@ -39,8 +39,17 @@ func main() {
 	go ingestor.Start()
 	log.Println("Price Ingestor started - connecting to Binance for real-time data")
 
-	// Initialize the HTTP/WebSocket server
-	srv := server.New(hub)
+	// Initialize the HTTP/WebSocket server with FRED API key
+	fredAPIKey := os.Getenv("FRED_API_KEY")
+	if fredAPIKey != "" {
+		log.Println("FRED API client initialized")
+	} else {
+		log.Println("⚠ FRED_API_KEY not set - FRED endpoints will be unavailable")
+	}
+
+	srv := server.New(hub, server.Config{
+		FREDAPIKey: fredAPIKey,
+	})
 	srv.RegisterFiberRoutes()
 
 	// Start the server in a goroutine
@@ -72,6 +81,11 @@ func startServer(srv *server.FiberServer, port int) {
 	log.Printf("Server starting on port %d", port)
 	log.Printf("WebSocket endpoint: ws://localhost:%d/ws/prices", port)
 	log.Printf("Health check: http://localhost:%d/health", port)
+	log.Printf("FRED API endpoints:")
+	log.Printf("  - GET /api/v1/fred/tickers (list all available tickers)")
+	log.Printf("  - GET /api/v1/fred/latest (get all latest values)")
+	log.Printf("  - GET /api/v1/fred/latest/:symbol (get latest value for symbol)")
+	log.Printf("  - GET /api/v1/fred/ticker/:symbol (get historical data)")
 
 	addr := fmt.Sprintf(":%d", port)
 	if err := srv.Listen(addr); err != nil {

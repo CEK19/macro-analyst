@@ -38,6 +38,22 @@ func (s *FiberServer) setupMiddleware() {
 func (s *FiberServer) setupHTTPRoutes() {
 	s.App.Get("/", s.HelloWorldHandler)
 	s.App.Get("/health", s.HealthHandler)
+
+	// FRED API routes
+	if s.FREDClient != nil {
+		s.setupFREDRoutes()
+	}
+}
+
+// setupFREDRoutes registers FRED macroeconomic data routes.
+func (s *FiberServer) setupFREDRoutes() {
+	api := s.App.Group("/api/v1")
+	
+	fred := api.Group("/fred")
+	fred.Get("/tickers", s.GetAllTickersHandler)
+	fred.Get("/ticker/:symbol", s.GetTickerDataHandler)
+	fred.Get("/latest", s.GetAllLatestHandler)
+	fred.Get("/latest/:symbol", s.GetLatestValueHandler)
 }
 
 // setupWebSocketRoutes registers all WebSocket routes.
